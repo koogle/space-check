@@ -118,7 +118,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::BOTTOM)
-        .title_bottom(Line::from(Span::styled(status, status_style)).right_aligned());
+        .title_top(Line::from(Span::styled(status, status_style)).right_aligned());
 
     let tabs = Tabs::new(titles)
         .block(block)
