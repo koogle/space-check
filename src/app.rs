@@ -337,22 +337,18 @@ impl App {
     }
 
     fn execute_delete(&mut self) {
-        let mut deleted = 0;
-        let mut errors = Vec::new();
+        // Collect items to delete and remove them from the UI lists immediately.
+        let mut items: Vec<DeleteItem> = Vec::new();
 
         match self.tab {
             Tab::Folders => {
                 let mut indices: Vec<usize> = self.top_selected.iter().copied().collect();
                 indices.sort_unstable_by(|a, b| b.cmp(a));
-                for idx in &indices {
-                    let path = &self.top_folders[*idx].path;
-                    match std::fs::remove_dir_all(path) {
-                        Ok(()) => deleted += 1,
-                        Err(e) => errors.push(format!("{}: {e}", path.display())),
-                    }
+                for &idx in &indices {
+                    items.push(DeleteItem::Dir(self.top_folders[idx].path.clone()));
                 }
-                for idx in &indices {
-                    self.top_folders.remove(*idx);
+                for &idx in &indices {
+                    self.top_folders.remove(idx);
                 }
                 self.top_selected.clear();
                 if let Some(sel) = self.top_table_state.selected() {
@@ -367,15 +363,11 @@ impl App {
             Tab::Cruft => {
                 let mut indices: Vec<usize> = self.cruft_selected.iter().copied().collect();
                 indices.sort_unstable_by(|a, b| b.cmp(a));
-                for idx in &indices {
-                    let path = &self.cruft_items[*idx].path;
-                    match std::fs::remove_dir_all(path) {
-                        Ok(()) => deleted += 1,
-                        Err(e) => errors.push(format!("{}: {e}", path.display())),
-                    }
+                for &idx in &indices {
+                    items.push(DeleteItem::Dir(self.cruft_items[idx].path.clone()));
                 }
-                for idx in &indices {
-                    self.cruft_items.remove(*idx);
+                for &idx in &indices {
+                    self.cruft_items.remove(idx);
                 }
                 self.cruft_selected.clear();
                 if let Some(sel) = self.cruft_table_state.selected() {
@@ -390,15 +382,11 @@ impl App {
             Tab::LargeFiles => {
                 let mut indices: Vec<usize> = self.large_selected.iter().copied().collect();
                 indices.sort_unstable_by(|a, b| b.cmp(a));
-                for idx in &indices {
-                    let path = &self.large_file_items[*idx].path;
-                    match std::fs::remove_file(path) {
-                        Ok(()) => deleted += 1,
-                        Err(e) => errors.push(format!("{}: {e}", path.display())),
-                    }
+                for &idx in &indices {
+                    items.push(DeleteItem::File(self.large_file_items[idx].path.clone()));
                 }
-                for idx in &indices {
-                    self.large_file_items.remove(*idx);
+                for &idx in &indices {
+                    self.large_file_items.remove(idx);
                 }
                 self.large_selected.clear();
                 if let Some(sel) = self.large_table_state.selected() {
@@ -410,10 +398,58 @@ impl App {
                     }
                 }
             }
-            _ => {}
+            _ => return,
         }
 
-        self.dialog = Dialog::DeleteResult { deleted, errors };
+        let total = items.len();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.delete_rx = Some(rx);
+        self.dialog = Dialog::Deleting { done: 0, total };
+
+        std::thread::spawn(move || {
+            let mut deleted = 0;
+            let mut errors = Vec::new();
+            for item in items {
+                let result = match &item {
+                    DeleteItem::Dir(p) => std::fs::remove_dir_all(p)
+                        .map_err(|e| format!("{}: {e}", p.display())),
+                    DeleteItem::File(p) => std::fs::remove_file(p)
+                        .map_err(|e| format!("{}: {e}", p.display())),
+                };
+                match result {
+                    Ok(()) => deleted += 1,
+                    Err(msg) => errors.push(msg),
+                }
+                let _ = tx.send(DeleteMessage::Progress);
+            }
+            let _ = tx.send(DeleteMessage::Done { deleted, errors });
+        });
+    }
+
+    /// Drain pending delete messages. Called each frame tick.
+    pub fn poll_delete(&mut self) {
+        let rx = match &self.delete_rx {
+            Some(rx) => rx,
+            None => return,
+        };
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                DeleteMessage::Progress => {
+                    if let Dialog::Deleting { ref mut done, .. } = self.dialog {
+                        *done += 1;
+                    }
+                }
+                DeleteMessage::Done { deleted, errors } => {
+                    self.dialog = Dialog::DeleteResult { deleted, errors };
+                    self.delete_rx = None;
+                    return;
+                }
+            }
+        }
+    }
+
+    pub fn is_deleting(&self) -> bool {
+        self.delete_rx.is_some()
     }
 
     fn cycle_sort(&mut self) {

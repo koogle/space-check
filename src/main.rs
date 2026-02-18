@@ -64,8 +64,9 @@ fn run_event_loop(
     app: &mut App,
 ) -> Result<()> {
     loop {
-        // Drain scanner messages
+        // Drain scanner and delete messages
         app.poll_scanner();
+        app.poll_delete();
 
         // Render
         terminal.draw(|f| ui::draw(f, app))?;
@@ -74,8 +75,8 @@ fn run_event_loop(
             break;
         }
 
-        // Poll input — shorter timeout while scanning for responsive progress updates
-        let timeout = if app.scanning {
+        // Poll input — shorter timeout while scanning/deleting for responsive progress updates
+        let timeout = if app.scanning || app.is_deleting() {
             Duration::from_millis(50)
         } else {
             Duration::from_millis(250)

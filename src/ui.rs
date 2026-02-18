@@ -59,6 +59,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Dialog::ConfirmDelete { count, total_size } => {
             draw_confirm_dialog(f, *count, *total_size);
         }
+        Dialog::Deleting { done, total } => {
+            draw_deleting_dialog(f, *done, *total);
+        }
         Dialog::DeleteResult { deleted, errors } => {
             draw_result_dialog(f, *deleted, errors);
         }
@@ -478,6 +481,31 @@ fn draw_confirm_dialog(f: &mut Frame, count: usize, total_size: u64) {
         .style(Style::default().fg(Color::White));
 
     f.render_widget(p, area);
+}
+
+fn draw_deleting_dialog(f: &mut Frame, done: usize, total: usize) {
+    let area = centered_rect(50, 7, f.area());
+    f.render_widget(Clear, area);
+
+    let text = format!("Deleting... {done}/{total} items processed");
+
+    let block = Block::default()
+        .title(" Deleting ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let ratio = if total > 0 {
+        done as f64 / total as f64
+    } else {
+        0.0
+    };
+    let gauge = Gauge::default()
+        .block(block)
+        .gauge_style(Style::default().fg(Color::Yellow).bg(Color::DarkGray))
+        .ratio(ratio)
+        .label(text);
+
+    f.render_widget(gauge, area);
 }
 
 fn draw_result_dialog(f: &mut Frame, deleted: usize, errors: &[String]) {
