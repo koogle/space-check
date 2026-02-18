@@ -1,10 +1,10 @@
 use crate::patterns::Category;
-use crate::scanner::{CruftEntry, LargeFileEntry, ScanMessage, TopFolderEntry};
+use crate::scanner::{self, CruftEntry, LargeFileEntry, ScanMessage, TopFolderEntry};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::widgets::TableState;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{self, Receiver};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -72,6 +72,9 @@ pub enum Dialog {
 
 pub struct App {
     pub tab: Tab,
+    // Navigation
+    pub nav_stack: Vec<PathBuf>,
+    pub threshold_bytes: u64,
     // Top folder view
     pub top_folders: Vec<TopFolderEntry>,
     pub top_table_state: TableState,
@@ -100,9 +103,11 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(rx: Receiver<ScanMessage>) -> Self {
+    pub fn new(rx: Receiver<ScanMessage>, root: PathBuf, threshold_bytes: u64) -> Self {
         Self {
             tab: Tab::Folders,
+            nav_stack: vec![root],
+            threshold_bytes,
             top_folders: Vec::new(),
             top_table_state: TableState::default(),
             top_selected: HashSet::new(),
@@ -252,6 +257,8 @@ impl App {
             KeyCode::Char('a') => self.select_all(),
             KeyCode::Char('d') => self.request_delete(),
             KeyCode::Char('s') => self.cycle_sort(),
+            KeyCode::Enter => self.enter_folder(),
+            KeyCode::Backspace => self.go_back(),
             _ => {}
         }
     }
@@ -450,6 +457,49 @@ impl App {
 
     pub fn is_deleting(&self) -> bool {
         self.delete_rx.is_some()
+    }
+
+    fn start_new_scan(&mut self, path: PathBuf) {
+        let (tx, rx) = mpsc::channel();
+        scanner::start_scan(path, self.threshold_bytes, tx);
+        self.rx = rx;
+
+        self.top_folders.clear();
+        self.top_table_state = TableState::default();
+        self.top_selected.clear();
+        self.cruft_items.clear();
+        self.cruft_table_state = TableState::default();
+        self.cruft_selected.clear();
+        self.large_file_items.clear();
+        self.large_table_state = TableState::default();
+        self.large_selected.clear();
+
+        self.scanning = true;
+        self.folders_total = 0;
+        self.folders_completed = 0;
+        self.bytes_scanned = 0;
+    }
+
+    fn enter_folder(&mut self) {
+        if self.tab != Tab::Folders {
+            return;
+        }
+        let idx = match self.top_table_state.selected() {
+            Some(i) if i < self.top_folders.len() => i,
+            _ => return,
+        };
+        let path = self.top_folders[idx].path.clone();
+        self.nav_stack.push(path.clone());
+        self.start_new_scan(path);
+    }
+
+    fn go_back(&mut self) {
+        if self.nav_stack.len() <= 1 {
+            return;
+        }
+        self.nav_stack.pop();
+        let path = self.nav_stack.last().unwrap().clone();
+        self.start_new_scan(path);
     }
 
     fn cycle_sort(&mut self) {

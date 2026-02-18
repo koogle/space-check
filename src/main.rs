@@ -43,10 +43,10 @@ fn main() -> Result<()> {
 
     // Start scanner
     let (tx, rx) = mpsc::channel();
-    let scan_handle = scanner::start_scan(root, threshold_bytes, tx);
+    let scan_handle = scanner::start_scan(root.clone(), threshold_bytes, tx);
 
     // Run app
-    let mut app = App::new(rx);
+    let mut app = App::new(rx, root, threshold_bytes);
     let result = run_event_loop(&mut terminal, &mut app);
 
     // Cleanup terminal — always runs

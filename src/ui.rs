@@ -31,8 +31,6 @@ fn category_color(cat: Category) -> Color {
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
-    let top_height = if app.scanning { 5 } else { 3 }; // extra row for progress bar
-
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -109,24 +107,23 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             .divider("|");
         f.render_widget(tabs, header_chunks[0]);
 
-        // Progress bar
-        let ratio = app.scan_progress_ratio();
-        let label = format!(
-            " {}/{} folders scanned  ({} found)",
+        // Progress bar (ASCII)
+        let ratio = app.scan_progress_ratio().clamp(0.0, 1.0);
+        let bar_width = header_chunks[1].width.saturating_sub(2) as usize; // room for [ ]
+        let filled = (ratio * bar_width as f64).round() as usize;
+        let bar = format!(
+            "[{}{}] {}/{} folders  ({})",
+            "#".repeat(filled),
+            " ".repeat(bar_width.saturating_sub(filled)),
             app.folders_completed,
             app.folders_total,
             ByteSize(app.bytes_scanned),
         );
-        let gauge = Gauge::default()
-            .block(Block::default())
-            .gauge_style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .ratio(ratio.clamp(0.0, 1.0))
-            .label(label);
-        f.render_widget(gauge, header_chunks[1]);
+        let p = Paragraph::new(Line::from(vec![
+            Span::styled(&bar[..filled + 1], Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(&bar[filled + 1..], Style::default().fg(Color::DarkGray)),
+        ]));
+        f.render_widget(p, header_chunks[1]);
     } else {
         let status = format!(
             "  Done — {} folders, {} cruft dirs, {} large files, {} total",
@@ -222,7 +219,8 @@ fn draw_folders_table(f: &mut Frame, app: &mut App, area: Rect) {
     )
     .header(header)
     .block(Block::default().borders(Borders::ALL).title(format!(
-        " Top Folders by Size — Total: {} ",
+        " {} — Total: {} ",
+        app.nav_stack.last().map_or("???".to_string(), |p| p.display().to_string()),
         ByteSize(total)
     )))
     .row_highlight_style(
@@ -442,8 +440,19 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         SortField::Category => "category",
     };
 
-    let right =
-        "j/k:nav  space:select  a:all  d:delete  s:sort  tab:switch  q:quit";
+    let nav_hints = if matches!(app.tab, Tab::Folders) {
+        if app.nav_stack.len() > 1 {
+            "enter:open  bksp:back  "
+        } else {
+            "enter:open  "
+        }
+    } else {
+        ""
+    };
+
+    let right = format!(
+        "{nav_hints}j/k:nav  space:select  a:all  d:delete  s:sort  tab:switch  q:quit"
+    );
 
     let line = Line::from(vec![
         Span::styled(left, Style::default().fg(Color::Yellow)),
