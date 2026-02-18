@@ -34,7 +34,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(top_height),
+            Constraint::Length(3),
             Constraint::Min(5),
             Constraint::Length(2),
         ])
@@ -88,67 +88,49 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         Tab::Overview => 3,
     };
 
-    if app.scanning {
-        // Split header area: tabs row + progress bar row
-        let header_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Length(2)])
-            .split(area);
-
-        let tabs = Tabs::new(titles)
-            .block(Block::default().borders(Borders::BOTTOM))
-            .select(selected)
-            .style(Style::default().fg(Color::White))
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .divider("|");
-        f.render_widget(tabs, header_chunks[0]);
-
-        // Progress bar (ASCII)
+    let status = if app.scanning {
         let ratio = app.scan_progress_ratio().clamp(0.0, 1.0);
-        let bar_width = header_chunks[1].width.saturating_sub(2) as usize; // room for [ ]
-        let filled = (ratio * bar_width as f64).round() as usize;
-        let bar = format!(
-            "[{}{}] {}/{} folders  ({})",
+        let bar_len = 20usize;
+        let filled = (ratio * bar_len as f64).round() as usize;
+        format!(
+            "[{}{}] {}/{}  ({}) ",
             "#".repeat(filled),
-            " ".repeat(bar_width.saturating_sub(filled)),
+            " ".repeat(bar_len.saturating_sub(filled)),
             app.folders_completed,
             app.folders_total,
             ByteSize(app.bytes_scanned),
-        );
-        let p = Paragraph::new(Line::from(vec![
-            Span::styled(&bar[..filled + 1], Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::styled(&bar[filled + 1..], Style::default().fg(Color::DarkGray)),
-        ]));
-        f.render_widget(p, header_chunks[1]);
+        )
     } else {
-        let status = format!(
-            "  Done — {} folders, {} cruft dirs, {} large files, {} total",
+        format!(
+            "Done — {} folders, {} cruft, {} large, {} total ",
             app.top_folders.len(),
             app.cruft_items.len(),
             app.large_file_items.len(),
             ByteSize(app.bytes_scanned),
-        );
+        )
+    };
 
-        let block = Block::default()
-            .title(Span::styled(status, Style::default().fg(Color::DarkGray)))
-            .borders(Borders::BOTTOM);
+    let status_style = if app.scanning {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
 
-        let tabs = Tabs::new(titles)
-            .block(block)
-            .select(selected)
-            .style(Style::default().fg(Color::White))
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .divider("|");
-        f.render_widget(tabs, area);
-    }
+    let block = Block::default()
+        .borders(Borders::BOTTOM)
+        .title_bottom(Line::from(Span::styled(status, status_style)).right_aligned());
+
+    let tabs = Tabs::new(titles)
+        .block(block)
+        .select(selected)
+        .style(Style::default().fg(Color::White))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+        .divider("|");
+    f.render_widget(tabs, area);
 }
 
 fn draw_folders_table(f: &mut Frame, app: &mut App, area: Rect) {
