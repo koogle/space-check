@@ -3,6 +3,7 @@ use crate::scanner::{CruftEntry, LargeFileEntry, ScanMessage, TopFolderEntry};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::widgets::TableState;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,10 +50,23 @@ pub enum SortField {
     Category,
 }
 
+pub enum DeleteMessage {
+    /// One item was processed (successfully or not).
+    Progress,
+    /// All items processed.
+    Done { deleted: usize, errors: Vec<String> },
+}
+
+enum DeleteItem {
+    Dir(PathBuf),
+    File(PathBuf),
+}
+
 #[derive(Debug)]
 pub enum Dialog {
     None,
     ConfirmDelete { count: usize, total_size: u64 },
+    Deleting { done: usize, total: usize },
     DeleteResult { deleted: usize, errors: Vec<String> },
 }
 
@@ -82,6 +96,7 @@ pub struct App {
     pub bytes_scanned: u64,
     pub should_quit: bool,
     rx: Receiver<ScanMessage>,
+    delete_rx: Option<Receiver<DeleteMessage>>,
 }
 
 impl App {
@@ -106,6 +121,7 @@ impl App {
             bytes_scanned: 0,
             should_quit: false,
             rx,
+            delete_rx: None,
         }
     }
 
@@ -210,6 +226,9 @@ impl App {
                     _ => {}
                 }
                 return;
+            }
+            Dialog::Deleting { .. } => {
+                return; // block all keys while deleting
             }
             Dialog::DeleteResult { .. } => {
                 self.dialog = Dialog::None;
