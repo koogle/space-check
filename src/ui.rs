@@ -153,6 +153,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_folders_table(f: &mut Frame, app: &mut App, area: Rect) {
     let header = Row::new(vec![
+        Cell::from(""),
         Cell::from("Path"),
         Cell::from("Total Size"),
         Cell::from("Cruft"),
@@ -169,7 +170,13 @@ fn draw_folders_table(f: &mut Frame, app: &mut App, area: Rect) {
     let rows: Vec<Row> = app
         .top_folders
         .iter()
-        .map(|item| {
+        .enumerate()
+        .map(|(i, item)| {
+            let check = if app.top_selected.contains(&i) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
             let name = item
                 .path
                 .file_name()
@@ -181,10 +188,10 @@ fn draw_folders_table(f: &mut Frame, app: &mut App, area: Rect) {
                 "—".to_string()
             };
 
-            // Color the size based on relative magnitude
             let size_color = size_heat_color(item.total_size, max_size);
 
             Row::new(vec![
+                Cell::from(check),
                 Cell::from(name),
                 Cell::from(ByteSize(item.total_size).to_string())
                     .style(Style::default().fg(size_color)),
@@ -203,6 +210,7 @@ fn draw_folders_table(f: &mut Frame, app: &mut App, area: Rect) {
     let table = Table::new(
         rows,
         [
+            Constraint::Length(3),
             Constraint::Min(30),
             Constraint::Length(12),
             Constraint::Length(12),
@@ -392,8 +400,8 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
             0.0
         };
         let filled = (fraction * bar_width as f64).round() as usize;
-        let bar: String = "█".repeat(filled)
-            + &"░".repeat(bar_width as usize - filled);
+        let bar: String = "#".repeat(filled)
+            + &".".repeat(bar_width as usize - filled);
         let pct = (fraction * 100.0).round() as u32;
 
         let label = format!(

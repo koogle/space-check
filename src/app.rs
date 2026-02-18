@@ -61,6 +61,7 @@ pub struct App {
     // Top folder view
     pub top_folders: Vec<TopFolderEntry>,
     pub top_table_state: TableState,
+    pub top_selected: HashSet<usize>,
     // Cruft view
     pub cruft_items: Vec<CruftEntry>,
     pub cruft_table_state: TableState,
@@ -89,6 +90,7 @@ impl App {
             tab: Tab::Folders,
             top_folders: Vec::new(),
             top_table_state: TableState::default(),
+            top_selected: HashSet::new(),
             cruft_items: Vec::new(),
             cruft_table_state: TableState::default(),
             cruft_selected: HashSet::new(),
@@ -260,7 +262,7 @@ impl App {
     }
 
     fn toggle_selection(&mut self) {
-        if matches!(self.tab, Tab::Folders | Tab::Overview) {
+        if matches!(self.tab, Tab::Overview) {
             return;
         }
         let (state, _) = self.active_table();
@@ -274,9 +276,10 @@ impl App {
 
     fn select_all(&mut self) {
         let len = match self.tab {
+            Tab::Folders => self.top_folders.len(),
             Tab::Cruft => self.cruft_items.len(),
             Tab::LargeFiles => self.large_file_items.len(),
-            Tab::Folders | Tab::Overview => return,
+            Tab::Overview => return,
         };
         let selected = self.active_selected_mut();
         if selected.len() == len {
@@ -288,14 +291,19 @@ impl App {
 
     fn request_delete(&mut self) {
         let selected = match self.tab {
+            Tab::Folders => &self.top_selected,
             Tab::Cruft => &self.cruft_selected,
             Tab::LargeFiles => &self.large_selected,
-            Tab::Folders | Tab::Overview => return,
+            Tab::Overview => return,
         };
         if selected.is_empty() {
             return;
         }
         let (count, total_size) = match self.tab {
+            Tab::Folders => {
+                let size: u64 = selected.iter().map(|&i| self.top_folders[i].total_size).sum();
+                (selected.len(), size)
+            }
             Tab::Cruft => {
                 let size: u64 = selected.iter().map(|&i| self.cruft_items[i].size).sum();
                 (selected.len(), size)
@@ -314,6 +322,29 @@ impl App {
         let mut errors = Vec::new();
 
         match self.tab {
+            Tab::Folders => {
+                let mut indices: Vec<usize> = self.top_selected.iter().copied().collect();
+                indices.sort_unstable_by(|a, b| b.cmp(a));
+                for idx in &indices {
+                    let path = &self.top_folders[*idx].path;
+                    match std::fs::remove_dir_all(path) {
+                        Ok(()) => deleted += 1,
+                        Err(e) => errors.push(format!("{}: {e}", path.display())),
+                    }
+                }
+                for idx in &indices {
+                    self.top_folders.remove(*idx);
+                }
+                self.top_selected.clear();
+                if let Some(sel) = self.top_table_state.selected() {
+                    if sel >= self.top_folders.len() && !self.top_folders.is_empty() {
+                        self.top_table_state
+                            .select(Some(self.top_folders.len() - 1));
+                    } else if self.top_folders.is_empty() {
+                        self.top_table_state.select(None);
+                    }
+                }
+            }
             Tab::Cruft => {
                 let mut indices: Vec<usize> = self.cruft_selected.iter().copied().collect();
                 indices.sort_unstable_by(|a, b| b.cmp(a));
@@ -392,6 +423,7 @@ impl App {
 
     fn active_selected_mut(&mut self) -> &mut HashSet<usize> {
         match self.tab {
+            Tab::Folders => &mut self.top_selected,
             Tab::Cruft => &mut self.cruft_selected,
             _ => &mut self.large_selected,
         }
@@ -423,6 +455,7 @@ impl App {
 
     pub fn selected_size(&self) -> u64 {
         match self.tab {
+            Tab::Folders => self.top_selected.iter().map(|&i| self.top_folders[i].total_size).sum(),
             Tab::Cruft => self.cruft_selected.iter().map(|&i| self.cruft_items[i].size).sum(),
             Tab::LargeFiles => self.large_selected.iter().map(|&i| self.large_file_items[i].size).sum(),
             _ => 0,
@@ -431,6 +464,7 @@ impl App {
 
     pub fn selected_count(&self) -> usize {
         match self.tab {
+            Tab::Folders => self.top_selected.len(),
             Tab::Cruft => self.cruft_selected.len(),
             Tab::LargeFiles => self.large_selected.len(),
             _ => 0,
