@@ -365,11 +365,21 @@ impl App {
     }
 
     fn select_all(&mut self) {
+        if self.tab == Tab::Selected {
+            // On Selected tab, "a" clears all selections
+            self.selected_paths.clear();
+            self.selected_table_state.select(None);
+            // Also clear index-based selections
+            self.top_selected.clear();
+            self.cruft_selected.clear();
+            self.large_selected.clear();
+            return;
+        }
         let (paths, len): (Vec<PathBuf>, usize) = match self.tab {
             Tab::Folders => (self.top_folders.iter().map(|f| f.path.clone()).collect(), self.top_folders.len()),
             Tab::Cruft => (self.cruft_items.iter().map(|c| c.path.clone()).collect(), self.cruft_items.len()),
             Tab::LargeFiles => (self.large_file_items.iter().map(|l| l.path.clone()).collect(), self.large_file_items.len()),
-            Tab::Overview => return,
+            Tab::Overview | Tab::Selected => return,
         };
         let selected = self.active_selected_mut();
         if selected.len() == len {
