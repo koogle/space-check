@@ -3,7 +3,7 @@ use anyhow::Result;
 use jwalk::WalkDirGeneric;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -43,19 +43,23 @@ pub fn start_scan(
     root: PathBuf,
     large_file_threshold: u64,
     tx: Sender<ScanMessage>,
+    cancel: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
-        if let Err(e) = run_scan(&root, large_file_threshold, &tx) {
+        if let Err(e) = run_scan(&root, large_file_threshold, &tx, &cancel) {
             let _ = tx.send(ScanMessage::Error(e.to_string()));
         }
         let _ = tx.send(ScanMessage::Done);
     })
 }
 
-fn run_scan(root: &Path, threshold: u64, tx: &Sender<ScanMessage>) -> Result<()> {
+fn run_scan(root: &Path, threshold: u64, tx: &Sender<ScanMessage>, cancel: &Arc<AtomicBool>) -> Result<()> {
     let mut top_dirs: Vec<PathBuf> = Vec::new();
 
     for entry in std::fs::read_dir(root)?.flatten() {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         let ft = entry.file_type();
         if ft.as_ref().map_or(false, |ft| ft.is_dir()) {
             top_dirs.push(entry.path());
@@ -73,8 +77,12 @@ fn run_scan(root: &Path, threshold: u64, tx: &Sender<ScanMessage>) -> Result<()>
 
     let _ = tx.send(ScanMessage::ScanTotal(top_dirs.len()));
 
+    let cancel2 = cancel.clone();
     top_dirs.par_iter().for_each(|dir| {
-        let entry = scan_top_folder(dir, threshold, tx);
+        if cancel2.load(Ordering::Relaxed) {
+            return;
+        }
+        let entry = scan_top_folder(dir, threshold, tx, &cancel2);
         let _ = tx.send(ScanMessage::TopFolderDone(entry));
     });
 
@@ -90,7 +98,7 @@ fn should_skip(name: &std::ffi::OsStr) -> bool {
 /// All stat calls happen inside the process_read_dir callback, which runs on
 /// rayon threads in parallel — much faster than accumulating in the
 /// single-threaded iterator.
-fn scan_top_folder(dir: &Path, threshold: u64, tx: &Sender<ScanMessage>) -> TopFolderEntry {
+fn scan_top_folder(dir: &Path, threshold: u64, tx: &Sender<ScanMessage>, cancel: &Arc<AtomicBool>) -> TopFolderEntry {
     let cruft_size = Arc::new(AtomicU64::new(0));
     let file_size = Arc::new(AtomicU64::new(0));
 
@@ -100,7 +108,16 @@ fn scan_top_folder(dir: &Path, threshold: u64, tx: &Sender<ScanMessage>) -> TopF
             let tx = tx.clone();
             let cruft_size = cruft_size.clone();
             let file_size = file_size.clone();
+            let cancel = cancel.clone();
             move |_depth, dir_path, _read_dir_state, children| {
+                if cancel.load(Ordering::Relaxed) {
+                    children.iter_mut().for_each(|c| {
+                        if let Ok(ref mut entry) = c {
+                            entry.read_children_path = None;
+                        }
+                    });
+                    return;
+                }
                 for child in children.iter_mut().flatten() {
                     if child.file_type().is_dir() {
                         let name = child.file_name();

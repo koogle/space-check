@@ -15,7 +15,8 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io;
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 #[derive(Parser)]
@@ -43,18 +44,16 @@ fn main() -> Result<()> {
 
     // Start scanner
     let (tx, rx) = mpsc::channel();
-    let scan_handle = scanner::start_scan(root.clone(), threshold_bytes, tx);
+    let cancel = Arc::new(AtomicBool::new(false));
+    scanner::start_scan(root.clone(), threshold_bytes, tx, cancel.clone());
 
     // Run app
-    let mut app = App::new(rx, root, threshold_bytes);
+    let mut app = App::new(rx, root, threshold_bytes, cancel);
     let result = run_event_loop(&mut terminal, &mut app);
 
     // Cleanup terminal — always runs
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
-
-    // Wait for scanner thread
-    let _ = scan_handle.join();
 
     result
 }

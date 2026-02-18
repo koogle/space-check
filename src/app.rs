@@ -4,7 +4,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::widgets::TableState;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -92,6 +94,8 @@ pub struct App {
     pub sort_ascending: bool,
     // Dialogs
     pub dialog: Dialog,
+    // Persistent path-based selections (survive navigation)
+    pub selected_paths: HashSet<PathBuf>,
     // Scan state
     pub scanning: bool,
     pub folders_total: usize,
@@ -99,11 +103,12 @@ pub struct App {
     pub bytes_scanned: u64,
     pub should_quit: bool,
     rx: Receiver<ScanMessage>,
+    cancel: Arc<AtomicBool>,
     delete_rx: Option<Receiver<DeleteMessage>>,
 }
 
 impl App {
-    pub fn new(rx: Receiver<ScanMessage>, root: PathBuf, threshold_bytes: u64) -> Self {
+    pub fn new(rx: Receiver<ScanMessage>, root: PathBuf, threshold_bytes: u64, cancel: Arc<AtomicBool>) -> Self {
         Self {
             tab: Tab::Folders,
             nav_stack: vec![root],
@@ -120,12 +125,14 @@ impl App {
             sort_field: SortField::Size,
             sort_ascending: false,
             dialog: Dialog::None,
+            selected_paths: HashSet::new(),
             scanning: true,
             folders_total: 0,
             folders_completed: 0,
             bytes_scanned: 0,
             should_quit: false,
             rx,
+            cancel,
             delete_rx: None,
         }
     }
@@ -167,6 +174,7 @@ impl App {
 
         if got_folder {
             self.top_folders.sort_by(|a, b| b.total_size.cmp(&a.total_size));
+            self.rebuild_top_selected();
             if self.top_table_state.selected().is_none() && !self.top_folders.is_empty() {
                 self.top_table_state.select(Some(0));
             }
@@ -185,8 +193,35 @@ impl App {
         }
     }
 
-    fn sort_cruft(&mut self) {
+    /// Rebuild index-based selections from `selected_paths`.
+    fn rebuild_top_selected(&mut self) {
+        self.top_selected.clear();
+        for (i, f) in self.top_folders.iter().enumerate() {
+            if self.selected_paths.contains(&f.path) {
+                self.top_selected.insert(i);
+            }
+        }
+    }
+
+    fn rebuild_cruft_selected(&mut self) {
         self.cruft_selected.clear();
+        for (i, c) in self.cruft_items.iter().enumerate() {
+            if self.selected_paths.contains(&c.path) {
+                self.cruft_selected.insert(i);
+            }
+        }
+    }
+
+    fn rebuild_large_selected(&mut self) {
+        self.large_selected.clear();
+        for (i, l) in self.large_file_items.iter().enumerate() {
+            if self.selected_paths.contains(&l.path) {
+                self.large_selected.insert(i);
+            }
+        }
+    }
+
+    fn sort_cruft(&mut self) {
         let asc = self.sort_ascending;
         match self.sort_field {
             SortField::Size => self.cruft_items.sort_by(|a, b| {
@@ -200,10 +235,10 @@ impl App {
                 if asc { cmp } else { cmp.reverse() }
             }),
         }
+        self.rebuild_cruft_selected();
     }
 
     fn sort_large(&mut self) {
-        self.large_selected.clear();
         let asc = self.sort_ascending;
         match self.sort_field {
             SortField::Size | SortField::Category => self.large_file_items.sort_by(|a, b| {
@@ -213,6 +248,7 @@ impl App {
                 if asc { a.path.cmp(&b.path) } else { b.path.cmp(&a.path) }
             }),
         }
+        self.rebuild_large_selected();
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
@@ -293,34 +329,70 @@ impl App {
         }
         let (state, _) = self.active_table();
         if let Some(idx) = state.selected() {
+            let path = self.path_at(idx);
             let selected = self.active_selected_mut();
             if !selected.remove(&idx) {
                 selected.insert(idx);
+                if let Some(p) = path {
+                    self.selected_paths.insert(p);
+                }
+            } else if let Some(p) = path {
+                self.selected_paths.remove(&p);
             }
         }
     }
 
     fn select_all(&mut self) {
-        let len = match self.tab {
-            Tab::Folders => self.top_folders.len(),
-            Tab::Cruft => self.cruft_items.len(),
-            Tab::LargeFiles => self.large_file_items.len(),
+        let (paths, len): (Vec<PathBuf>, usize) = match self.tab {
+            Tab::Folders => (self.top_folders.iter().map(|f| f.path.clone()).collect(), self.top_folders.len()),
+            Tab::Cruft => (self.cruft_items.iter().map(|c| c.path.clone()).collect(), self.cruft_items.len()),
+            Tab::LargeFiles => (self.large_file_items.iter().map(|l| l.path.clone()).collect(), self.large_file_items.len()),
             Tab::Overview => return,
         };
         let selected = self.active_selected_mut();
         if selected.len() == len {
+            // Deselect all
             selected.clear();
+            for p in &paths {
+                self.selected_paths.remove(p);
+            }
         } else {
+            // Select all
             *selected = (0..len).collect();
+            for p in paths {
+                self.selected_paths.insert(p);
+            }
         }
     }
 
     fn request_delete(&mut self) {
+        if matches!(self.tab, Tab::Overview) {
+            return;
+        }
+        // If nothing explicitly selected, default to the cursor row
+        let selected = match self.tab {
+            Tab::Folders => &mut self.top_selected,
+            Tab::Cruft => &mut self.cruft_selected,
+            Tab::LargeFiles => &mut self.large_selected,
+            Tab::Overview => unreachable!(),
+        };
+        if selected.is_empty() {
+            let (state, len) = self.active_table();
+            if let Some(idx) = state.selected() {
+                if idx < len {
+                    if let Some(p) = self.path_at(idx) {
+                        self.selected_paths.insert(p);
+                    }
+                    let sel = self.active_selected_mut();
+                    sel.insert(idx);
+                }
+            }
+        }
         let selected = match self.tab {
             Tab::Folders => &self.top_selected,
             Tab::Cruft => &self.cruft_selected,
             Tab::LargeFiles => &self.large_selected,
-            Tab::Overview => return,
+            Tab::Overview => unreachable!(),
         };
         if selected.is_empty() {
             return;
@@ -352,6 +424,7 @@ impl App {
                 let mut indices: Vec<usize> = self.top_selected.iter().copied().collect();
                 indices.sort_unstable_by(|a, b| b.cmp(a));
                 for &idx in &indices {
+                    self.selected_paths.remove(&self.top_folders[idx].path);
                     items.push(DeleteItem::Dir(self.top_folders[idx].path.clone()));
                 }
                 for &idx in &indices {
@@ -371,6 +444,7 @@ impl App {
                 let mut indices: Vec<usize> = self.cruft_selected.iter().copied().collect();
                 indices.sort_unstable_by(|a, b| b.cmp(a));
                 for &idx in &indices {
+                    self.selected_paths.remove(&self.cruft_items[idx].path);
                     items.push(DeleteItem::Dir(self.cruft_items[idx].path.clone()));
                 }
                 for &idx in &indices {
@@ -390,6 +464,7 @@ impl App {
                 let mut indices: Vec<usize> = self.large_selected.iter().copied().collect();
                 indices.sort_unstable_by(|a, b| b.cmp(a));
                 for &idx in &indices {
+                    self.selected_paths.remove(&self.large_file_items[idx].path);
                     items.push(DeleteItem::File(self.large_file_items[idx].path.clone()));
                 }
                 for &idx in &indices {
@@ -460,8 +535,15 @@ impl App {
     }
 
     fn start_new_scan(&mut self, path: PathBuf) {
+        // Cancel the previous scan
+        self.cancel.store(true, Ordering::Relaxed);
+
+        // New cancel token for the new scan
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.cancel = cancel.clone();
+
         let (tx, rx) = mpsc::channel();
-        scanner::start_scan(path, self.threshold_bytes, tx);
+        scanner::start_scan(path, self.threshold_bytes, tx, cancel);
         self.rx = rx;
 
         self.top_folders.clear();
@@ -494,10 +576,22 @@ impl App {
     }
 
     fn go_back(&mut self) {
-        if self.nav_stack.len() <= 1 {
-            return;
+        if self.nav_stack.len() > 1 {
+            // Go back to previously visited parent
+            self.nav_stack.pop();
+        } else {
+            // At root of stack — go up to filesystem parent
+            let current = self.nav_stack.last().unwrap();
+            if let Some(parent) = current.parent() {
+                let parent = parent.to_path_buf();
+                if parent == *current {
+                    return; // already at filesystem root
+                }
+                self.nav_stack[0] = parent;
+            } else {
+                return;
+            }
         }
-        self.nav_stack.pop();
         let path = self.nav_stack.last().unwrap().clone();
         self.start_new_scan(path);
     }
@@ -531,6 +625,15 @@ impl App {
             Tab::Folders => &mut self.top_selected,
             Tab::Cruft => &mut self.cruft_selected,
             _ => &mut self.large_selected,
+        }
+    }
+
+    fn path_at(&self, idx: usize) -> Option<PathBuf> {
+        match self.tab {
+            Tab::Folders => self.top_folders.get(idx).map(|f| f.path.clone()),
+            Tab::Cruft => self.cruft_items.get(idx).map(|c| c.path.clone()),
+            Tab::LargeFiles => self.large_file_items.get(idx).map(|l| l.path.clone()),
+            Tab::Overview => None,
         }
     }
 
