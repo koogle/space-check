@@ -88,37 +88,51 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         Tab::Overview => 3,
     };
 
-    let status = if app.scanning {
+    let sel_count = app.selected_paths.len();
+
+    let mut status_spans = if app.scanning {
         let ratio = app.scan_progress_ratio().clamp(0.0, 1.0);
         let bar_len = 20usize;
         let filled = (ratio * bar_len as f64).round() as usize;
-        format!(
-            "[{}{}] {}/{}  ({}) ",
-            "#".repeat(filled),
-            " ".repeat(bar_len.saturating_sub(filled)),
-            app.folders_completed,
-            app.folders_total,
-            ByteSize(app.bytes_scanned),
-        )
+        vec![Span::styled(
+            format!(
+                "[{}{}] {}/{}  ({})",
+                "#".repeat(filled),
+                " ".repeat(bar_len.saturating_sub(filled)),
+                app.folders_completed,
+                app.folders_total,
+                ByteSize(app.bytes_scanned),
+            ),
+            Style::default().fg(Color::Cyan),
+        )]
     } else {
-        format!(
-            "Done — {} folders, {} cruft, {} large, {} total ",
-            app.top_folders.len(),
-            app.cruft_items.len(),
-            app.large_file_items.len(),
-            ByteSize(app.bytes_scanned),
-        )
+        vec![Span::styled(
+            format!(
+                "Done — {} folders, {} cruft, {} large, {} total",
+                app.top_folders.len(),
+                app.cruft_items.len(),
+                app.large_file_items.len(),
+                ByteSize(app.bytes_scanned),
+            ),
+            Style::default().fg(Color::DarkGray),
+        )]
     };
 
-    let status_style = if app.scanning {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
+    status_spans.push(Span::raw(" "));
 
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::BOTTOM)
-        .title_top(Line::from(Span::styled(status, status_style)).right_aligned());
+        .title_top(Line::from(status_spans).right_aligned());
+
+    if sel_count > 0 {
+        block = block.title_bottom(
+            Line::from(Span::styled(
+                format!(" {} selected ", sel_count),
+                Style::default().fg(Color::Yellow),
+            ))
+            .right_aligned(),
+        );
+    }
 
     let tabs = Tabs::new(titles)
         .block(block)

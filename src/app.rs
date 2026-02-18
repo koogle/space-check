@@ -13,6 +13,7 @@ pub enum Tab {
     Folders,
     Cruft,
     LargeFiles,
+    Selected,
     Overview,
 }
 
@@ -22,6 +23,7 @@ impl Tab {
             Tab::Folders => "Folders",
             Tab::Cruft => "Cruft Dirs",
             Tab::LargeFiles => "Large Files",
+            Tab::Selected => "Selected",
             Tab::Overview => "Overview",
         }
     }
@@ -30,7 +32,8 @@ impl Tab {
         match self {
             Tab::Folders => Tab::Cruft,
             Tab::Cruft => Tab::LargeFiles,
-            Tab::LargeFiles => Tab::Overview,
+            Tab::LargeFiles => Tab::Selected,
+            Tab::Selected => Tab::Overview,
             Tab::Overview => Tab::Folders,
         }
     }
@@ -40,7 +43,8 @@ impl Tab {
             Tab::Folders => Tab::Overview,
             Tab::Cruft => Tab::Folders,
             Tab::LargeFiles => Tab::Cruft,
-            Tab::Overview => Tab::LargeFiles,
+            Tab::Selected => Tab::LargeFiles,
+            Tab::Overview => Tab::Selected,
         }
     }
 }
@@ -96,6 +100,7 @@ pub struct App {
     pub dialog: Dialog,
     // Persistent path-based selections (survive navigation)
     pub selected_paths: HashSet<PathBuf>,
+    pub selected_table_state: TableState,
     // Scan state
     pub scanning: bool,
     pub folders_total: usize,
@@ -126,6 +131,7 @@ impl App {
             sort_ascending: false,
             dialog: Dialog::None,
             selected_paths: HashSet::new(),
+            selected_table_state: TableState::default(),
             scanning: true,
             folders_total: 0,
             folders_completed: 0,
@@ -325,6 +331,22 @@ impl App {
 
     fn toggle_selection(&mut self) {
         if matches!(self.tab, Tab::Overview) {
+            return;
+        }
+        if self.tab == Tab::Selected {
+            // On Selected tab, space removes the item
+            let paths: Vec<PathBuf> = self.sorted_selected_paths();
+            if let Some(idx) = self.selected_table_state.selected() {
+                if let Some(p) = paths.get(idx) {
+                    self.selected_paths.remove(p);
+                    // Fix cursor if it's past the end
+                    if self.selected_paths.is_empty() {
+                        self.selected_table_state.select(None);
+                    } else if idx >= self.selected_paths.len() {
+                        self.selected_table_state.select(Some(self.selected_paths.len() - 1));
+                    }
+                }
+            }
             return;
         }
         let (state, _) = self.active_table();
@@ -616,6 +638,7 @@ impl App {
             Tab::Folders => (&mut self.top_table_state, self.top_folders.len()),
             Tab::Cruft => (&mut self.cruft_table_state, self.cruft_items.len()),
             Tab::LargeFiles => (&mut self.large_table_state, self.large_file_items.len()),
+            Tab::Selected => (&mut self.selected_table_state, self.selected_paths.len()),
             Tab::Overview => (&mut self.top_table_state, 0),
         }
     }
@@ -633,8 +656,15 @@ impl App {
             Tab::Folders => self.top_folders.get(idx).map(|f| f.path.clone()),
             Tab::Cruft => self.cruft_items.get(idx).map(|c| c.path.clone()),
             Tab::LargeFiles => self.large_file_items.get(idx).map(|l| l.path.clone()),
+            Tab::Selected => self.sorted_selected_paths().into_iter().nth(idx),
             Tab::Overview => None,
         }
+    }
+
+    pub fn sorted_selected_paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = self.selected_paths.iter().cloned().collect();
+        paths.sort();
+        paths
     }
 
     /// Compute category breakdown for the overview tab.
