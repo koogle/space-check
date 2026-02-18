@@ -1,13 +1,13 @@
 use crate::patterns::Category;
-use crate::scanner::{CruftEntry, LargeFileEntry, ScanMessage};
+use crate::scanner::{CruftEntry, LargeFileEntry, ScanMessage, TopFolderEntry};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::widgets::TableState;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
+    Folders,
     Cruft,
     LargeFiles,
     Overview,
@@ -16,6 +16,7 @@ pub enum Tab {
 impl Tab {
     pub fn title(self) -> &'static str {
         match self {
+            Tab::Folders => "Folders",
             Tab::Cruft => "Cruft Dirs",
             Tab::LargeFiles => "Large Files",
             Tab::Overview => "Overview",
@@ -24,15 +25,17 @@ impl Tab {
 
     pub fn next(self) -> Self {
         match self {
+            Tab::Folders => Tab::Cruft,
             Tab::Cruft => Tab::LargeFiles,
             Tab::LargeFiles => Tab::Overview,
-            Tab::Overview => Tab::Cruft,
+            Tab::Overview => Tab::Folders,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            Tab::Cruft => Tab::Overview,
+            Tab::Folders => Tab::Overview,
+            Tab::Cruft => Tab::Folders,
             Tab::LargeFiles => Tab::Cruft,
             Tab::Overview => Tab::LargeFiles,
         }
@@ -55,17 +58,27 @@ pub enum Dialog {
 
 pub struct App {
     pub tab: Tab,
+    // Top folder view
+    pub top_folders: Vec<TopFolderEntry>,
+    pub top_table_state: TableState,
+    // Cruft view
     pub cruft_items: Vec<CruftEntry>,
-    pub large_file_items: Vec<LargeFileEntry>,
     pub cruft_table_state: TableState,
-    pub large_table_state: TableState,
     pub cruft_selected: HashSet<usize>,
+    // Large files view
+    pub large_file_items: Vec<LargeFileEntry>,
+    pub large_table_state: TableState,
     pub large_selected: HashSet<usize>,
+    // Sorting
     pub sort_field: SortField,
     pub sort_ascending: bool,
+    // Dialogs
     pub dialog: Dialog,
+    // Scan state
     pub scanning: bool,
-    pub scan_progress: Option<PathBuf>,
+    pub folders_total: usize,
+    pub folders_completed: usize,
+    pub bytes_scanned: u64,
     pub should_quit: bool,
     rx: Receiver<ScanMessage>,
 }
@@ -73,18 +86,22 @@ pub struct App {
 impl App {
     pub fn new(rx: Receiver<ScanMessage>) -> Self {
         Self {
-            tab: Tab::Cruft,
+            tab: Tab::Folders,
+            top_folders: Vec::new(),
+            top_table_state: TableState::default(),
             cruft_items: Vec::new(),
-            large_file_items: Vec::new(),
             cruft_table_state: TableState::default(),
-            large_table_state: TableState::default(),
             cruft_selected: HashSet::new(),
+            large_file_items: Vec::new(),
+            large_table_state: TableState::default(),
             large_selected: HashSet::new(),
             sort_field: SortField::Size,
             sort_ascending: false,
             dialog: Dialog::None,
             scanning: true,
-            scan_progress: None,
+            folders_total: 0,
+            folders_completed: 0,
+            bytes_scanned: 0,
             should_quit: false,
             rx,
         }
@@ -92,78 +109,90 @@ impl App {
 
     /// Drain pending scanner messages. Called each frame tick.
     pub fn poll_scanner(&mut self) {
-        let mut got_items = false;
+        let mut got_cruft = false;
+        let mut got_large = false;
+        let mut got_folder = false;
+
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
+                ScanMessage::ScanTotal(total) => {
+                    self.folders_total = total;
+                }
+                ScanMessage::TopFolderDone(entry) => {
+                    self.folders_completed += 1;
+                    self.bytes_scanned += entry.total_size;
+                    self.top_folders.push(entry);
+                    got_folder = true;
+                }
                 ScanMessage::CruftFound(entry) => {
                     self.cruft_items.push(entry);
-                    got_items = true;
+                    got_cruft = true;
                 }
                 ScanMessage::LargeFileFound(entry) => {
                     self.large_file_items.push(entry);
-                    got_items = true;
-                }
-                ScanMessage::Progress(path) => {
-                    self.scan_progress = Some(path);
+                    got_large = true;
                 }
                 ScanMessage::Done => {
                     self.scanning = false;
                 }
                 ScanMessage::Error(e) => {
-                    self.scan_progress = Some(PathBuf::from(format!("Error: {e}")));
+                    // Show error in progress area by noting it
+                    eprintln!("Scan error: {e}");
                 }
             }
         }
-        if got_items {
-            self.sort_items();
-            // Auto-select first row if nothing selected yet
+
+        if got_folder {
+            self.top_folders.sort_by(|a, b| b.total_size.cmp(&a.total_size));
+            if self.top_table_state.selected().is_none() && !self.top_folders.is_empty() {
+                self.top_table_state.select(Some(0));
+            }
+        }
+        if got_cruft {
+            self.sort_cruft();
             if self.cruft_table_state.selected().is_none() && !self.cruft_items.is_empty() {
                 self.cruft_table_state.select(Some(0));
             }
+        }
+        if got_large {
+            self.sort_large();
             if self.large_table_state.selected().is_none() && !self.large_file_items.is_empty() {
                 self.large_table_state.select(Some(0));
             }
         }
     }
 
-    fn sort_items(&mut self) {
-        // Clear selections before sort since indices change
+    fn sort_cruft(&mut self) {
         self.cruft_selected.clear();
-        self.large_selected.clear();
-
         let asc = self.sort_ascending;
         match self.sort_field {
-            SortField::Size => {
-                self.cruft_items.sort_by(|a, b| {
-                    if asc { a.size.cmp(&b.size) } else { b.size.cmp(&a.size) }
-                });
-                self.large_file_items.sort_by(|a, b| {
-                    if asc { a.size.cmp(&b.size) } else { b.size.cmp(&a.size) }
-                });
-            }
-            SortField::Path => {
-                self.cruft_items.sort_by(|a, b| {
-                    if asc { a.path.cmp(&b.path) } else { b.path.cmp(&a.path) }
-                });
-                self.large_file_items.sort_by(|a, b| {
-                    if asc { a.path.cmp(&b.path) } else { b.path.cmp(&a.path) }
-                });
-            }
-            SortField::Category => {
-                self.cruft_items.sort_by(|a, b| {
-                    let cmp = a.category.as_str().cmp(b.category.as_str());
-                    if asc { cmp } else { cmp.reverse() }
-                });
-                // Large files don't have categories, fall back to size
-                self.large_file_items.sort_by(|a, b| {
-                    if asc { a.size.cmp(&b.size) } else { b.size.cmp(&a.size) }
-                });
-            }
+            SortField::Size => self.cruft_items.sort_by(|a, b| {
+                if asc { a.size.cmp(&b.size) } else { b.size.cmp(&a.size) }
+            }),
+            SortField::Path => self.cruft_items.sort_by(|a, b| {
+                if asc { a.path.cmp(&b.path) } else { b.path.cmp(&a.path) }
+            }),
+            SortField::Category => self.cruft_items.sort_by(|a, b| {
+                let cmp = a.category.as_str().cmp(b.category.as_str());
+                if asc { cmp } else { cmp.reverse() }
+            }),
+        }
+    }
+
+    fn sort_large(&mut self) {
+        self.large_selected.clear();
+        let asc = self.sort_ascending;
+        match self.sort_field {
+            SortField::Size | SortField::Category => self.large_file_items.sort_by(|a, b| {
+                if asc { a.size.cmp(&b.size) } else { b.size.cmp(&a.size) }
+            }),
+            SortField::Path => self.large_file_items.sort_by(|a, b| {
+                if asc { a.path.cmp(&b.path) } else { b.path.cmp(&a.path) }
+            }),
         }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
-        // Only handle Press events (prevents double-handling on Windows)
         if key.kind != KeyEventKind::Press {
             return;
         }
@@ -181,7 +210,6 @@ impl App {
                 return;
             }
             Dialog::DeleteResult { .. } => {
-                // Any key dismisses
                 self.dialog = Dialog::None;
                 return;
             }
@@ -232,6 +260,9 @@ impl App {
     }
 
     fn toggle_selection(&mut self) {
+        if matches!(self.tab, Tab::Folders | Tab::Overview) {
+            return;
+        }
         let (state, _) = self.active_table();
         if let Some(idx) = state.selected() {
             let selected = self.active_selected_mut();
@@ -245,7 +276,7 @@ impl App {
         let len = match self.tab {
             Tab::Cruft => self.cruft_items.len(),
             Tab::LargeFiles => self.large_file_items.len(),
-            Tab::Overview => return,
+            Tab::Folders | Tab::Overview => return,
         };
         let selected = self.active_selected_mut();
         if selected.len() == len {
@@ -259,7 +290,7 @@ impl App {
         let selected = match self.tab {
             Tab::Cruft => &self.cruft_selected,
             Tab::LargeFiles => &self.large_selected,
-            Tab::Overview => return,
+            Tab::Folders | Tab::Overview => return,
         };
         if selected.is_empty() {
             return;
@@ -273,7 +304,7 @@ impl App {
                 let size: u64 = selected.iter().map(|&i| self.large_file_items[i].size).sum();
                 (selected.len(), size)
             }
-            Tab::Overview => return,
+            _ => return,
         };
         self.dialog = Dialog::ConfirmDelete { count, total_size };
     }
@@ -285,7 +316,7 @@ impl App {
         match self.tab {
             Tab::Cruft => {
                 let mut indices: Vec<usize> = self.cruft_selected.iter().copied().collect();
-                indices.sort_unstable_by(|a, b| b.cmp(a)); // reverse to remove from end
+                indices.sort_unstable_by(|a, b| b.cmp(a));
                 for idx in &indices {
                     let path = &self.cruft_items[*idx].path;
                     match std::fs::remove_dir_all(path) {
@@ -293,15 +324,14 @@ impl App {
                         Err(e) => errors.push(format!("{}: {e}", path.display())),
                     }
                 }
-                // Remove from list in reverse order
                 for idx in &indices {
                     self.cruft_items.remove(*idx);
                 }
                 self.cruft_selected.clear();
-                // Fix cursor
                 if let Some(sel) = self.cruft_table_state.selected() {
                     if sel >= self.cruft_items.len() && !self.cruft_items.is_empty() {
-                        self.cruft_table_state.select(Some(self.cruft_items.len() - 1));
+                        self.cruft_table_state
+                            .select(Some(self.cruft_items.len() - 1));
                     } else if self.cruft_items.is_empty() {
                         self.cruft_table_state.select(None);
                     }
@@ -330,7 +360,7 @@ impl App {
                     }
                 }
             }
-            Tab::Overview => {}
+            _ => {}
         }
 
         self.dialog = Dialog::DeleteResult { deleted, errors };
@@ -347,21 +377,23 @@ impl App {
                 SortField::Category => SortField::Size,
             };
         }
-        self.sort_items();
+        self.sort_cruft();
+        self.sort_large();
     }
 
     fn active_table(&mut self) -> (&mut TableState, usize) {
         match self.tab {
+            Tab::Folders => (&mut self.top_table_state, self.top_folders.len()),
             Tab::Cruft => (&mut self.cruft_table_state, self.cruft_items.len()),
             Tab::LargeFiles => (&mut self.large_table_state, self.large_file_items.len()),
-            Tab::Overview => (&mut self.cruft_table_state, 0), // overview has no table
+            Tab::Overview => (&mut self.top_table_state, 0),
         }
     }
 
     fn active_selected_mut(&mut self) -> &mut HashSet<usize> {
         match self.tab {
             Tab::Cruft => &mut self.cruft_selected,
-            Tab::LargeFiles | Tab::Overview => &mut self.large_selected,
+            _ => &mut self.large_selected,
         }
     }
 
@@ -377,7 +409,7 @@ impl App {
             .into_iter()
             .map(|(cat, (size, count))| (cat, size, count))
             .collect();
-        stats.sort_by(|a, b| b.1.cmp(&a.1)); // sort by size desc
+        stats.sort_by(|a, b| b.1.cmp(&a.1));
         stats
     }
 
@@ -393,7 +425,7 @@ impl App {
         match self.tab {
             Tab::Cruft => self.cruft_selected.iter().map(|&i| self.cruft_items[i].size).sum(),
             Tab::LargeFiles => self.large_selected.iter().map(|&i| self.large_file_items[i].size).sum(),
-            Tab::Overview => 0,
+            _ => 0,
         }
     }
 
@@ -401,7 +433,15 @@ impl App {
         match self.tab {
             Tab::Cruft => self.cruft_selected.len(),
             Tab::LargeFiles => self.large_selected.len(),
-            Tab::Overview => 0,
+            _ => 0,
+        }
+    }
+
+    pub fn scan_progress_ratio(&self) -> f64 {
+        if self.folders_total == 0 {
+            0.0
+        } else {
+            self.folders_completed as f64 / self.folders_total as f64
         }
     }
 }

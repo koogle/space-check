@@ -612,6 +612,7 @@ dependencies = [
  "crossterm",
  "jwalk",
  "ratatui",
+ "rayon",
 ]
 
 [[package]]

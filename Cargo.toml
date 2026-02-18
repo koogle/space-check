@@ -11,3 +11,4 @@ jwalk = "0.8"
 clap = { version = "4", features = ["derive"] }
 bytesize = "1"
 anyhow = "1"
+rayon = "1"

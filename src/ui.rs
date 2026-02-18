@@ -5,7 +5,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs, Wrap,
+    Block, Borders, Cell, Clear, Gauge, Paragraph, Row, Table, Tabs, Wrap,
 };
 use ratatui::Frame;
 
@@ -31,18 +31,21 @@ fn category_color(cat: Category) -> Color {
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    let top_height = if app.scanning { 5 } else { 3 }; // extra row for progress bar
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // tabs + status
-            Constraint::Min(5),   // main content
-            Constraint::Length(2), // footer
+            Constraint::Length(top_height),
+            Constraint::Min(5),
+            Constraint::Length(2),
         ])
         .split(f.area());
 
-    draw_tabs(f, app, chunks[0]);
+    draw_header(f, app, chunks[0]);
 
     match app.tab {
+        Tab::Folders => draw_folders_table(f, app, chunks[1]),
         Tab::Cruft => draw_cruft_table(f, app, chunks[1]),
         Tab::LargeFiles => draw_large_files_table(f, app, chunks[1]),
         Tab::Overview => draw_overview(f, app, chunks[1]),
@@ -50,7 +53,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     draw_footer(f, app, chunks[2]);
 
-    // Draw dialog overlay if active
+    // Dialog overlay
     match &app.dialog {
         Dialog::None => {}
         Dialog::ConfirmDelete { count, total_size } => {
@@ -62,63 +65,163 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
-fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
-    let titles: Vec<Line> = [Tab::Cruft, Tab::LargeFiles, Tab::Overview]
+fn draw_header(f: &mut Frame, app: &App, area: Rect) {
+    let all_tabs = [Tab::Folders, Tab::Cruft, Tab::LargeFiles, Tab::Overview];
+    let titles: Vec<Line> = all_tabs
         .iter()
         .map(|t| {
-            let count = match t {
+            let label = match t {
+                Tab::Folders => format!(" {} ({}) ", t.title(), app.top_folders.len()),
                 Tab::Cruft => format!(" {} ({}) ", t.title(), app.cruft_items.len()),
                 Tab::LargeFiles => format!(" {} ({}) ", t.title(), app.large_file_items.len()),
                 Tab::Overview => format!(" {} ", t.title()),
             };
-            Line::from(count)
+            Line::from(label)
         })
         .collect();
 
     let selected = match app.tab {
-        Tab::Cruft => 0,
-        Tab::LargeFiles => 1,
-        Tab::Overview => 2,
+        Tab::Folders => 0,
+        Tab::Cruft => 1,
+        Tab::LargeFiles => 2,
+        Tab::Overview => 3,
     };
 
-    let status = if app.scanning {
-        let path = app
-            .scan_progress
-            .as_ref()
-            .map(|p| {
-                let s = p.display().to_string();
-                if s.len() > 50 {
-                    format!("...{}", &s[s.len() - 47..])
-                } else {
-                    s
-                }
-            })
-            .unwrap_or_default();
-        format!("  Scanning: {path}")
+    if app.scanning {
+        // Split header area: tabs row + progress bar row
+        let header_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Length(2)])
+            .split(area);
+
+        let tabs = Tabs::new(titles)
+            .block(Block::default().borders(Borders::BOTTOM))
+            .select(selected)
+            .style(Style::default().fg(Color::White))
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .divider("|");
+        f.render_widget(tabs, header_chunks[0]);
+
+        // Progress bar
+        let ratio = app.scan_progress_ratio();
+        let label = format!(
+            " {}/{} folders scanned  ({} found)",
+            app.folders_completed,
+            app.folders_total,
+            ByteSize(app.bytes_scanned),
+        );
+        let gauge = Gauge::default()
+            .block(Block::default())
+            .gauge_style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .ratio(ratio.clamp(0.0, 1.0))
+            .label(label);
+        f.render_widget(gauge, header_chunks[1]);
     } else {
-        format!(
-            "  Scan complete — {} cruft dirs, {} large files",
+        let status = format!(
+            "  Done — {} folders, {} cruft dirs, {} large files, {} total",
+            app.top_folders.len(),
             app.cruft_items.len(),
-            app.large_file_items.len()
-        )
-    };
+            app.large_file_items.len(),
+            ByteSize(app.bytes_scanned),
+        );
 
-    let block = Block::default()
-        .title(Span::styled(status, Style::default().fg(Color::DarkGray)))
-        .borders(Borders::BOTTOM);
+        let block = Block::default()
+            .title(Span::styled(status, Style::default().fg(Color::DarkGray)))
+            .borders(Borders::BOTTOM);
 
-    let tabs = Tabs::new(titles)
-        .block(block)
-        .select(selected)
-        .style(Style::default().fg(Color::White))
-        .highlight_style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
-        .divider("|");
+        let tabs = Tabs::new(titles)
+            .block(block)
+            .select(selected)
+            .style(Style::default().fg(Color::White))
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .divider("|");
+        f.render_widget(tabs, area);
+    }
+}
 
-    f.render_widget(tabs, area);
+fn draw_folders_table(f: &mut Frame, app: &mut App, area: Rect) {
+    let header = Row::new(vec![
+        Cell::from("Path"),
+        Cell::from("Total Size"),
+        Cell::from("Cruft"),
+        Cell::from("Cruft %"),
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let max_size = app.top_folders.first().map_or(1, |f| f.total_size.max(1));
+
+    let rows: Vec<Row> = app
+        .top_folders
+        .iter()
+        .map(|item| {
+            let name = item
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| item.path.display().to_string());
+            let pct = if item.total_size > 0 {
+                format!("{:.0}%", item.cruft_size as f64 / item.total_size as f64 * 100.0)
+            } else {
+                "—".to_string()
+            };
+
+            // Color the size based on relative magnitude
+            let size_color = size_heat_color(item.total_size, max_size);
+
+            Row::new(vec![
+                Cell::from(name),
+                Cell::from(ByteSize(item.total_size).to_string())
+                    .style(Style::default().fg(size_color)),
+                Cell::from(ByteSize(item.cruft_size).to_string())
+                    .style(Style::default().fg(if item.cruft_size > 0 {
+                        Color::Yellow
+                    } else {
+                        Color::DarkGray
+                    })),
+                Cell::from(pct),
+            ])
+        })
+        .collect();
+
+    let total: u64 = app.top_folders.iter().map(|f| f.total_size).sum();
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Min(30),
+            Constraint::Length(12),
+            Constraint::Length(12),
+            Constraint::Length(8),
+        ],
+    )
+    .header(header)
+    .block(Block::default().borders(Borders::ALL).title(format!(
+        " Top Folders by Size — Total: {} ",
+        ByteSize(total)
+    )))
+    .row_highlight_style(
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )
+    .highlight_symbol(">> ");
+
+    f.render_stateful_widget(table, area, &mut app.top_table_state);
 }
 
 fn draw_cruft_table(f: &mut Frame, app: &mut App, area: Rect) {
@@ -247,7 +350,7 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(
-            " Category Overview — Total: {} ",
+            " Category Overview — Total Cruft: {} ",
             ByteSize(total_size)
         ));
 
@@ -265,8 +368,7 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // Horizontal bar chart
-    let bar_width = inner.width.saturating_sub(30) as u64; // leave room for labels
+    let bar_width = inner.width.saturating_sub(30) as u64;
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -290,7 +392,8 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
             0.0
         };
         let filled = (fraction * bar_width as f64).round() as usize;
-        let bar: String = "█".repeat(filled) + &"░".repeat(bar_width as usize - filled);
+        let bar: String = "█".repeat(filled)
+            + &"░".repeat(bar_width as usize - filled);
         let pct = (fraction * 100.0).round() as u32;
 
         let label = format!(
@@ -400,6 +503,20 @@ fn draw_result_dialog(f: &mut Frame, deleted: usize, errors: &[String]) {
         .style(Style::default().fg(Color::White));
 
     f.render_widget(p, area);
+}
+
+/// Map a size value to a heat color relative to the max.
+fn size_heat_color(size: u64, max: u64) -> Color {
+    let ratio = size as f64 / max as f64;
+    if ratio > 0.7 {
+        Color::Red
+    } else if ratio > 0.4 {
+        Color::Yellow
+    } else if ratio > 0.15 {
+        Color::White
+    } else {
+        Color::DarkGray
+    }
 }
 
 fn sort_indicator_str(field: SortField, ascending: bool) -> &'static str {
