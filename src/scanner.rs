@@ -2,27 +2,28 @@ use crate::patterns::{self, Category};
 use anyhow::Result;
 use jwalk::WalkDirGeneric;
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CruftEntry {
     pub path: PathBuf,
     pub size: u64,
     pub category: Category,
-    pub description: &'static str,
+    pub description: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LargeFileEntry {
     pub path: PathBuf,
     pub size: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TopFolderEntry {
     pub path: PathBuf,
     pub total_size: u64,
@@ -137,7 +138,7 @@ fn scan_top_folder(dir: &Path, threshold: u64, tx: &Sender<ScanMessage>, cancel:
                                 path: child.path(),
                                 size,
                                 category: pattern.category,
-                                description: pattern.description,
+                                description: pattern.description.to_owned(),
                             }));
                         }
                     } else if child.file_type().is_file() {

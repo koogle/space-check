@@ -1,4 +1,5 @@
 mod app;
+mod cache;
 mod patterns;
 mod scanner;
 mod ui;
@@ -15,8 +16,6 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
-use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 #[derive(Parser)]
@@ -29,6 +28,10 @@ struct Cli {
     /// Large file threshold in MB
     #[arg(short, long, default_value_t = 100)]
     threshold: u64,
+
+    /// Enable disk caching of scan results (5 min TTL)
+    #[arg(long)]
+    cache: bool,
 }
 
 fn main() -> Result<()> {
@@ -42,13 +45,8 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    // Start scanner
-    let (tx, rx) = mpsc::channel();
-    let cancel = Arc::new(AtomicBool::new(false));
-    scanner::start_scan(root.clone(), threshold_bytes, tx, cancel.clone());
-
-    // Run app
-    let mut app = App::new(rx, root, threshold_bytes, cancel);
+    // Run app (handles its own scanning, with optional cache)
+    let mut app = App::new(root, threshold_bytes, cli.cache);
     let result = run_event_loop(&mut terminal, &mut app);
 
     // Cleanup terminal — always runs

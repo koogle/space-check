@@ -1,3 +1,4 @@
+use crate::cache::{self, CacheConfig, CacheKey, CachedScanResult};
 use crate::patterns::Category;
 use crate::scanner::{self, CruftEntry, LargeFileEntry, ScanMessage, TopFolderEntry};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -110,14 +111,23 @@ pub struct App {
     pub should_quit: bool,
     rx: Receiver<ScanMessage>,
     cancel: Arc<AtomicBool>,
+    cache_config: Option<CacheConfig>,
     delete_rx: Option<Receiver<DeleteMessage>>,
 }
 
 impl App {
-    pub fn new(rx: Receiver<ScanMessage>, root: PathBuf, threshold_bytes: u64, cancel: Arc<AtomicBool>) -> Self {
-        Self {
+    pub fn new(root: PathBuf, threshold_bytes: u64, cache_enabled: bool) -> Self {
+        let cache_config = if cache_enabled {
+            CacheConfig::default_config()
+        } else {
+            None
+        };
+        // Dummy channel — start_new_scan will replace it
+        let (_tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut app = Self {
             tab: Tab::Folders,
-            nav_stack: vec![root],
+            nav_stack: vec![root.clone()],
             threshold_bytes,
             top_folders: Vec::new(),
             top_table_state: TableState::default(),
@@ -133,7 +143,7 @@ impl App {
             dialog: Dialog::None,
             selected_paths: HashSet::new(),
             selected_table_state: TableState::default(),
-            scanning: true,
+            scanning: false,
             spin_tick: 0,
             folders_total: 0,
             folders_completed: 0,
@@ -141,8 +151,11 @@ impl App {
             should_quit: false,
             rx,
             cancel,
+            cache_config,
             delete_rx: None,
-        }
+        };
+        app.start_new_scan(root);
+        app
     }
 
     /// Drain pending scanner messages. Called each frame tick.
@@ -175,6 +188,19 @@ impl App {
                 }
                 ScanMessage::Done => {
                     self.scanning = false;
+                    if let Some(ref config) = self.cache_config {
+                        let result = CachedScanResult {
+                            key: CacheKey {
+                                scan_root: self.nav_stack.last().unwrap().clone(),
+                                threshold_bytes: self.threshold_bytes,
+                            },
+                            created_at: std::time::SystemTime::now(),
+                            top_folders: self.top_folders.clone(),
+                            cruft_items: self.cruft_items.clone(),
+                            large_file_items: self.large_file_items.clone(),
+                        };
+                        cache::save(config, &result);
+                    }
                 }
                 ScanMessage::Error(e) => {
                     // Show error in progress area by noting it
@@ -543,6 +569,17 @@ impl App {
             _ => return,
         }
 
+        // Invalidate cache for deleted paths
+        if let Some(ref config) = self.cache_config {
+            let deleted_paths: Vec<PathBuf> = items
+                .iter()
+                .map(|item| match item {
+                    DeleteItem::Dir(p) | DeleteItem::File(p) => p.clone(),
+                })
+                .collect();
+            cache::invalidate_containing(config, &deleted_paths);
+        }
+
         let total = items.len();
         let (tx, rx) = std::sync::mpsc::channel();
         self.delete_rx = Some(rx);
@@ -598,14 +635,7 @@ impl App {
         // Cancel the previous scan
         self.cancel.store(true, Ordering::Relaxed);
 
-        // New cancel token for the new scan
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.cancel = cancel.clone();
-
-        let (tx, rx) = mpsc::channel();
-        scanner::start_scan(path, self.threshold_bytes, tx, cancel);
-        self.rx = rx;
-
+        // Clear UI state
         self.top_folders.clear();
         self.top_table_state = TableState::default();
         self.top_selected.clear();
@@ -615,11 +645,56 @@ impl App {
         self.large_file_items.clear();
         self.large_table_state = TableState::default();
         self.large_selected.clear();
-
-        self.scanning = true;
         self.folders_total = 0;
         self.folders_completed = 0;
         self.bytes_scanned = 0;
+
+        // Try cache first
+        let cache_key = CacheKey {
+            scan_root: path.clone(),
+            threshold_bytes: self.threshold_bytes,
+        };
+        if let Some(ref config) = self.cache_config {
+            if let Some(cached) = cache::load(config, &cache_key) {
+                self.top_folders = cached.top_folders;
+                self.cruft_items = cached.cruft_items;
+                self.large_file_items = cached.large_file_items;
+
+                self.top_folders.sort_by(|a, b| b.total_size.cmp(&a.total_size));
+                self.rebuild_top_selected();
+                if !self.top_folders.is_empty() {
+                    self.top_table_state.select(Some(0));
+                }
+                self.sort_cruft();
+                if !self.cruft_items.is_empty() {
+                    self.cruft_table_state.select(Some(0));
+                }
+                self.sort_large();
+                if !self.large_file_items.is_empty() {
+                    self.large_table_state.select(Some(0));
+                }
+                self.bytes_scanned = self.top_folders.iter().map(|f| f.total_size).sum();
+                self.folders_total = self.top_folders.len();
+                self.folders_completed = self.top_folders.len();
+                self.scanning = false;
+
+                // Dummy channel — scan is already "done"
+                let (_tx, rx) = mpsc::channel();
+                self.rx = rx;
+                let cancel = Arc::new(AtomicBool::new(false));
+                self.cancel = cancel;
+                return;
+            }
+        }
+
+        // Cache miss — launch a real scan
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.cancel = cancel.clone();
+
+        let (tx, rx) = mpsc::channel();
+        scanner::start_scan(path, self.threshold_bytes, tx, cancel);
+        self.rx = rx;
+        self.scanning = true;
     }
 
     fn enter_folder(&mut self) {

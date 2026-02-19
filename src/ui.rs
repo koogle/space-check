@@ -257,7 +257,7 @@ fn draw_cruft_table(f: &mut Frame, app: &mut App, area: Rect) {
                 Cell::from(item.path.display().to_string()),
                 Cell::from(size),
                 Cell::from(item.category.as_str()).style(Style::default().fg(cat_color)),
-                Cell::from(item.description),
+                Cell::from(item.description.as_str()),
             ])
         })
         .collect();
