@@ -103,6 +103,7 @@ pub struct App {
     pub selected_table_state: TableState,
     // Scan state
     pub scanning: bool,
+    pub spin_tick: usize,
     pub folders_total: usize,
     pub folders_completed: usize,
     pub bytes_scanned: u64,
@@ -133,6 +134,7 @@ impl App {
             selected_paths: HashSet::new(),
             selected_table_state: TableState::default(),
             scanning: true,
+            spin_tick: 0,
             folders_total: 0,
             folders_completed: 0,
             bytes_scanned: 0,
@@ -145,6 +147,9 @@ impl App {
 
     /// Drain pending scanner messages. Called each frame tick.
     pub fn poll_scanner(&mut self) {
+        if self.scanning {
+            self.spin_tick = self.spin_tick.wrapping_add(1);
+        }
         let mut got_cruft = false;
         let mut got_large = false;
         let mut got_folder = false;
@@ -401,12 +406,20 @@ impl App {
         if matches!(self.tab, Tab::Overview) {
             return;
         }
+        if self.tab == Tab::Selected {
+            if self.selected_paths.is_empty() {
+                return;
+            }
+            let count = self.selected_paths.len();
+            self.dialog = Dialog::ConfirmDelete { count, total_size: 0 };
+            return;
+        }
         // If nothing explicitly selected, default to the cursor row
         let selected = match self.tab {
             Tab::Folders => &mut self.top_selected,
             Tab::Cruft => &mut self.cruft_selected,
             Tab::LargeFiles => &mut self.large_selected,
-            Tab::Overview => unreachable!(),
+            _ => return,
         };
         if selected.is_empty() {
             let (state, len) = self.active_table();
@@ -424,7 +437,7 @@ impl App {
             Tab::Folders => &self.top_selected,
             Tab::Cruft => &self.cruft_selected,
             Tab::LargeFiles => &self.large_selected,
-            Tab::Overview => unreachable!(),
+            _ => return,
         };
         if selected.is_empty() {
             return;
@@ -511,6 +524,21 @@ impl App {
                         self.large_table_state.select(None);
                     }
                 }
+            }
+            Tab::Selected => {
+                // Delete everything in selected_paths
+                for p in self.selected_paths.drain() {
+                    if p.is_dir() {
+                        items.push(DeleteItem::Dir(p));
+                    } else {
+                        items.push(DeleteItem::File(p));
+                    }
+                }
+                self.selected_table_state.select(None);
+                // Also clear index-based selections since paths are gone
+                self.top_selected.clear();
+                self.cruft_selected.clear();
+                self.large_selected.clear();
             }
             _ => return,
         }

@@ -46,6 +46,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Tab::Folders => draw_folders_table(f, app, chunks[1]),
         Tab::Cruft => draw_cruft_table(f, app, chunks[1]),
         Tab::LargeFiles => draw_large_files_table(f, app, chunks[1]),
+        Tab::Selected => draw_selected_table(f, app, chunks[1]),
         Tab::Overview => draw_overview(f, app, chunks[1]),
     }
 
@@ -67,7 +68,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
-    let all_tabs = [Tab::Folders, Tab::Cruft, Tab::LargeFiles, Tab::Overview];
+    let all_tabs = [Tab::Folders, Tab::Cruft, Tab::LargeFiles, Tab::Selected, Tab::Overview];
     let titles: Vec<Line> = all_tabs
         .iter()
         .map(|t| {
@@ -75,6 +76,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
                 Tab::Folders => format!(" {} ({}) ", t.title(), app.top_folders.len()),
                 Tab::Cruft => format!(" {} ({}) ", t.title(), app.cruft_items.len()),
                 Tab::LargeFiles => format!(" {} ({}) ", t.title(), app.large_file_items.len()),
+                Tab::Selected => format!(" {} ({}) ", t.title(), app.selected_paths.len()),
                 Tab::Overview => format!(" {} ", t.title()),
             };
             Line::from(label)
@@ -85,18 +87,20 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         Tab::Folders => 0,
         Tab::Cruft => 1,
         Tab::LargeFiles => 2,
-        Tab::Overview => 3,
+        Tab::Selected => 3,
+        Tab::Overview => 4,
     };
 
-    let sel_count = app.selected_paths.len();
+    const SPINNER: &[char] = &['|', '/', '-', '\\'];
 
-    let mut status_spans = if app.scanning {
+    let status_spans = if app.scanning {
         let ratio = app.scan_progress_ratio().clamp(0.0, 1.0);
         let bar_len = 20usize;
         let filled = (ratio * bar_len as f64).round() as usize;
+        let spin = SPINNER[app.spin_tick % SPINNER.len()];
         vec![Span::styled(
             format!(
-                "[{}{}] {}/{}  ({})",
+                "{spin} [{}{}] {}/{}  ({})",
                 "#".repeat(filled),
                 " ".repeat(bar_len.saturating_sub(filled)),
                 app.folders_completed,
@@ -118,21 +122,12 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         )]
     };
 
-    status_spans.push(Span::raw(" "));
+    let mut spans = status_spans;
+    spans.push(Span::raw(" "));
 
-    let mut block = Block::default()
+    let block = Block::default()
         .borders(Borders::BOTTOM)
-        .title_top(Line::from(status_spans).right_aligned());
-
-    if sel_count > 0 {
-        block = block.title_bottom(
-            Line::from(Span::styled(
-                format!(" {} selected ", sel_count),
-                Style::default().fg(Color::Yellow),
-            ))
-            .right_aligned(),
-        );
-    }
+        .title_top(Line::from(spans).right_aligned());
 
     let tabs = Tabs::new(titles)
         .block(block)
@@ -346,6 +341,47 @@ fn draw_large_files_table(f: &mut Frame, app: &mut App, area: Rect) {
     .highlight_symbol(">> ");
 
     f.render_stateful_widget(table, area, &mut app.large_table_state);
+}
+
+fn draw_selected_table(f: &mut Frame, app: &mut App, area: Rect) {
+    let paths = app.sorted_selected_paths();
+
+    let header = Row::new(vec![
+        Cell::from("Path"),
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let rows: Vec<Row> = paths
+        .iter()
+        .map(|p| Row::new(vec![Cell::from(p.display().to_string())]))
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [Constraint::Min(40)],
+    )
+    .header(header)
+    .block(Block::default().borders(Borders::ALL).title(format!(
+        " Selected — {} items ",
+        paths.len()
+    )))
+    .row_highlight_style(
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )
+    .highlight_symbol(">> ");
+
+    f.render_stateful_widget(table, area, &mut app.selected_table_state);
+
+    // Auto-select first row if we have items but no selection
+    if app.selected_table_state.selected().is_none() && !paths.is_empty() {
+        app.selected_table_state.select(Some(0));
+    }
 }
 
 fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
