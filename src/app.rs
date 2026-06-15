@@ -209,10 +209,9 @@ impl App {
                         }
                     }
                 }
-                ScanMessage::Error(e) => {
+                ScanMessage::Error(error) => {
                     self.scan_had_error = true;
-                    // Show error in progress area by noting it
-                    eprintln!("Scan error: {e}");
+                    drop(error);
                 }
             }
         }

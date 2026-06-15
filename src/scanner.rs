@@ -1,6 +1,6 @@
 use crate::patterns::{self, Category};
 use anyhow::Result;
-use jwalk::WalkDirGeneric;
+use jwalk::{Error as WalkError, WalkDirGeneric};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -70,21 +70,12 @@ fn run_scan(
 
         let entry = match entry {
             Ok(entry) => entry,
-            Err(err) => {
-                let _ = tx.send(ScanMessage::Error(format!("{}: {err}", root.display())));
-                continue;
-            }
+            Err(_) => continue,
         };
 
         let ft = match entry.file_type() {
             Ok(ft) => ft,
-            Err(err) => {
-                let _ = tx.send(ScanMessage::Error(format!(
-                    "{}: {err}",
-                    entry.path().display()
-                )));
-                continue;
-            }
+            Err(_) => continue,
         };
 
         if ft.is_dir() {
@@ -99,12 +90,7 @@ fn run_scan(
                         }));
                     }
                 }
-                Err(err) => {
-                    let _ = tx.send(ScanMessage::Error(format!(
-                        "{}: {err}",
-                        entry.path().display()
-                    )));
-                }
+                Err(_) => {}
             }
         }
     }
@@ -171,7 +157,7 @@ fn scan_top_folder(
                         if let Some(pattern) = patterns::match_cruft(&name, dir_path) {
                             child.read_children_path = None;
 
-                            let size = dir_size_fast(&child.path(), &tx);
+                            let size = dir_size_fast(&child.path());
                             cruft_size.fetch_add(size, Ordering::Relaxed);
                             let _ = tx.send(ScanMessage::CruftFound(CruftEntry {
                                 path: child.path(),
@@ -194,10 +180,7 @@ fn scan_top_folder(
                                     }));
                                 }
                             }
-                            Err(err) => {
-                                let _ = tx
-                                    .send(ScanMessage::Error(format!("{}: {err}", path.display())));
-                            }
+                            Err(_) => {}
                         }
                     }
                 }
@@ -209,11 +192,11 @@ fn scan_top_folder(
         match entry {
             Ok(entry) => {
                 if let Some(err) = entry.read_children_error {
-                    let _ = tx.send(ScanMessage::Error(err.to_string()));
+                    report_walk_error(tx, err);
                 }
             }
             Err(err) => {
-                let _ = tx.send(ScanMessage::Error(err.to_string()));
+                report_walk_error(tx, err);
             }
         }
     }
@@ -230,44 +213,27 @@ fn scan_top_folder(
 /// Compute directory size with a simple recursive read_dir.
 /// Much cheaper than spawning a full jwalk walker per cruft dir,
 /// especially for small dirs like __pycache__ (avoids rayon/channel overhead).
-fn dir_size_fast(path: &Path, tx: &Sender<ScanMessage>) -> u64 {
+fn dir_size_fast(path: &Path) -> u64 {
     let mut total: u64 = 0;
     let mut stack = vec![path.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
-            Err(err) => {
-                let _ = tx.send(ScanMessage::Error(format!("{}: {err}", dir.display())));
-                continue;
-            }
+            Err(_) => continue,
         };
         for entry in entries {
             let entry = match entry {
                 Ok(entry) => entry,
-                Err(err) => {
-                    let _ = tx.send(ScanMessage::Error(format!("{}: {err}", dir.display())));
-                    continue;
-                }
+                Err(_) => continue,
             };
             let ft = match entry.file_type() {
                 Ok(ft) => ft,
-                Err(err) => {
-                    let _ = tx.send(ScanMessage::Error(format!(
-                        "{}: {err}",
-                        entry.path().display()
-                    )));
-                    continue;
-                }
+                Err(_) => continue,
             };
             if ft.is_file() {
                 match entry.metadata() {
                     Ok(meta) => total += meta.len(),
-                    Err(err) => {
-                        let _ = tx.send(ScanMessage::Error(format!(
-                            "{}: {err}",
-                            entry.path().display()
-                        )));
-                    }
+                    Err(_) => {}
                 }
             } else if ft.is_dir() {
                 stack.push(entry.path());
@@ -275,6 +241,12 @@ fn dir_size_fast(path: &Path, tx: &Sender<ScanMessage>) -> u64 {
         }
     }
     total
+}
+
+fn report_walk_error(tx: &Sender<ScanMessage>, err: WalkError) {
+    if err.is_busy() {
+        let _ = tx.send(ScanMessage::Error(err.to_string()));
+    }
 }
 
 #[cfg(test)]
@@ -367,6 +339,39 @@ mod tests {
 
         assert!(errors.is_empty(), "unexpected scan errors: {errors:?}");
         assert_eq!(top_folders, 2);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_folders_are_skipped_without_ui_errors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_path("unreadable");
+        let readable = root.join("readable");
+        let unreadable = root.join("unreadable");
+        fs::create_dir_all(&readable).unwrap();
+        fs::create_dir_all(&unreadable).unwrap();
+        write_bytes(&readable.join("file.txt"), 5);
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        run_scan(&root, 1024, &tx, &cancel).unwrap();
+
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let messages: Vec<_> = rx.try_iter().collect();
+        let errors: Vec<_> = messages
+            .iter()
+            .filter_map(|msg| match msg {
+                ScanMessage::Error(error) => Some(error.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(errors.is_empty(), "unexpected scan errors: {errors:?}");
 
         fs::remove_dir_all(root).unwrap();
     }
