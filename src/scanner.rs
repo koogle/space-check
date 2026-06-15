@@ -1,6 +1,7 @@
 use crate::patterns::{self, Category};
 use anyhow::Result;
-use jwalk::{Error as WalkError, WalkDirGeneric};
+use jwalk::{Error as WalkError, Parallelism, WalkDirGeneric};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -97,15 +98,16 @@ fn run_scan(
 
     let _ = tx.send(ScanMessage::ScanTotal(top_dirs.len()));
 
-    for dir in top_dirs {
-        if cancel.load(Ordering::Relaxed) {
-            break;
+    let cancel2 = cancel.clone();
+    top_dirs.par_iter().for_each(|dir| {
+        if cancel2.load(Ordering::Relaxed) {
+            return;
         }
-        let entry = scan_top_folder(&dir, threshold, tx, cancel);
-        if !cancel.load(Ordering::Relaxed) {
+        let entry = scan_top_folder(dir, threshold, tx, &cancel2);
+        if !cancel2.load(Ordering::Relaxed) {
             let _ = tx.send(ScanMessage::TopFolderDone(entry));
         }
-    }
+    });
 
     Ok(())
 }
@@ -116,9 +118,8 @@ fn should_skip(name: &std::ffi::OsStr) -> bool {
 }
 
 /// Scan a single top-level folder: detect cruft, large files, compute total size.
-/// All stat calls happen inside the process_read_dir callback, which runs on
-/// rayon threads in parallel — much faster than accumulating in the
-/// single-threaded iterator.
+/// Each top-level folder is scanned on Rayon, so the jwalk inside a folder is
+/// kept serial to avoid nested Rayon thread-pool dependency errors.
 fn scan_top_folder(
     dir: &Path,
     threshold: u64,
@@ -130,6 +131,7 @@ fn scan_top_folder(
 
     let walk = WalkDirGeneric::<((), ())>::new(dir)
         .skip_hidden(false)
+        .parallelism(Parallelism::Serial)
         .process_read_dir({
             let tx = tx.clone();
             let cruft_size = cruft_size.clone();
