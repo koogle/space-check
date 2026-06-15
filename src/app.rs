@@ -112,6 +112,7 @@ pub struct App {
     rx: Receiver<ScanMessage>,
     cancel: Arc<AtomicBool>,
     cache_config: Option<CacheConfig>,
+    scan_had_error: bool,
     delete_rx: Option<Receiver<DeleteMessage>>,
 }
 
@@ -152,6 +153,7 @@ impl App {
             rx,
             cancel,
             cache_config,
+            scan_had_error: false,
             delete_rx: None,
         };
         app.start_new_scan(root);
@@ -186,25 +188,30 @@ impl App {
                     self.large_file_items.push(entry);
                     got_large = true;
                 }
-                ScanMessage::Done => {
+                ScanMessage::Done { cancelled } => {
                     self.scanning = false;
-                    if let Some(ref config) = self.cache_config {
-                        let result = CachedScanResult {
-                            key: CacheKey {
-                                scan_root: self.nav_stack.last().unwrap().clone(),
-                                threshold_bytes: self.threshold_bytes,
-                            },
-                            created_at: std::time::SystemTime::now(),
-                            top_folders: self.top_folders.clone(),
-                            cruft_items: self.cruft_items.clone(),
-                            large_file_items: self.large_file_items.clone(),
-                        };
-                        cache::save(config, &result);
+                    let scan_completed = !cancelled
+                        && !self.scan_had_error
+                        && self.folders_completed == self.folders_total;
+                    if scan_completed {
+                        if let Some(ref config) = self.cache_config {
+                            let result = CachedScanResult {
+                                key: CacheKey {
+                                    scan_root: self.nav_stack.last().unwrap().clone(),
+                                    threshold_bytes: self.threshold_bytes,
+                                },
+                                created_at: std::time::SystemTime::now(),
+                                top_folders: self.top_folders.clone(),
+                                cruft_items: self.cruft_items.clone(),
+                                large_file_items: self.large_file_items.clone(),
+                            };
+                            cache::save(config, &result);
+                        }
                     }
                 }
-                ScanMessage::Error(e) => {
-                    // Show error in progress area by noting it
-                    eprintln!("Scan error: {e}");
+                ScanMessage::Error(error) => {
+                    self.scan_had_error = true;
+                    drop(error);
                 }
             }
         }
@@ -648,6 +655,7 @@ impl App {
         self.folders_total = 0;
         self.folders_completed = 0;
         self.bytes_scanned = 0;
+        self.scan_had_error = false;
 
         // Try cache first
         let cache_key = CacheKey {
